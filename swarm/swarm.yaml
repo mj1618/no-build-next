@@ -3,4 +3,6 @@ tasks:
   fixer:
     iterations: 100
     prompt-string: |
-      run this on ../brew-cms and identify any bugs, then fix them
+      Use the `playwright-cli` to use a browser, see `playwright-cli --help` for more information.
+      run this on ../brew-cms click around and identify any bugs, then fix them.
+      If everything works, check HMR is working.

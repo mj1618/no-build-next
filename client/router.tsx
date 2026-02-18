@@ -72,12 +72,21 @@ function compilePattern(pattern: string): { regex: RegExp; paramNames: string[] 
 }
 
 /**
+ * Normalize a pathname by stripping trailing slashes (except for root "/").
+ */
+function normalizePath(pathname: string): string {
+  if (pathname === "/") return pathname;
+  return pathname.replace(/\/+$/, "");
+}
+
+/**
  * Match a pathname against the route table.
  */
 function matchRoute(pathname: string, routes: ClientRoute[]): RouteMatch | null {
+  const normalized = normalizePath(pathname);
   for (const route of routes) {
     const { regex, paramNames } = compilePattern(route.pattern);
-    const match = pathname.match(regex);
+    const match = normalized.match(regex);
     if (match) {
       const params: Record<string, string> = {};
       for (let i = 0; i < paramNames.length; i++) {
@@ -89,22 +98,29 @@ function matchRoute(pathname: string, routes: ClientRoute[]): RouteMatch | null 
   return null;
 }
 
+declare global {
+  interface Window { __hmrVersion?: number; }
+}
+
+function cacheBust(path: string): string {
+  const v = window.__hmrVersion || 0;
+  return v ? `${path}?v=${v}` : path;
+}
+
 /**
  * Dynamically import a page and its layout chain, plus optional boundary modules.
  */
 async function loadRouteModules(routeMatch: RouteMatch): Promise<LoadedRoute> {
   const { route, params } = routeMatch;
 
-  // Import page and all layouts in parallel
   const [pageModule, ...layoutModules] = await Promise.all([
-    import(/* @vite-ignore */ route.pagePath),
-    ...route.layoutPaths.map((p) => import(/* @vite-ignore */ p)),
+    import(/* @vite-ignore */ cacheBust(route.pagePath)),
+    ...route.layoutPaths.map((p) => import(/* @vite-ignore */ cacheBust(p))),
   ]);
 
-  // Load optional boundary modules in parallel
   const [loadingModule, errorModule] = await Promise.all([
-    route.loadingPath ? import(/* @vite-ignore */ route.loadingPath) : null,
-    route.errorPath ? import(/* @vite-ignore */ route.errorPath) : null,
+    route.loadingPath ? import(/* @vite-ignore */ cacheBust(route.loadingPath)) : null,
+    route.errorPath ? import(/* @vite-ignore */ cacheBust(route.errorPath)) : null,
   ]);
 
   return {
@@ -117,14 +133,14 @@ async function loadRouteModules(routeMatch: RouteMatch): Promise<LoadedRoute> {
 }
 
 /**
- * Find the root-level not-found path from the route table.
+ * Find the not-found info from the route table: path + layout paths.
  * The route scanner inherits notFoundPath, so any route that has one
  * can provide it — we pick the first one that exists (they all inherit
  * from root if app/not-found.tsx exists).
  */
-function findNotFoundPath(routes: ClientRoute[]): string | null {
+function findNotFoundInfo(routes: ClientRoute[]): { notFoundPath: string; layoutPaths: string[] } | null {
   for (const route of routes) {
-    if (route.notFoundPath) return route.notFoundPath;
+    if (route.notFoundPath) return { notFoundPath: route.notFoundPath, layoutPaths: route.layoutPaths };
   }
   return null;
 }
@@ -134,6 +150,7 @@ export function Router() {
   const [loaded, setLoaded] = useState<LoadedRoute | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [notFoundComponent, setNotFoundComponent] = useState<ComponentType | null>(null);
+  const [notFoundLayouts, setNotFoundLayouts] = useState<ComponentType<{ children: ReactNode; params: Record<string, string> }>[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   // Resolve a pathname: match route, load modules, update state
@@ -147,15 +164,20 @@ export function Router() {
         setNotFound(true);
         setLoaded(null);
 
-        // Try to load a custom not-found component
-        const nfPath = findNotFoundPath(routeTable);
-        if (nfPath) {
+        // Try to load a custom not-found component + its layouts
+        const nfInfo = findNotFoundInfo(routeTable);
+        if (nfInfo) {
           try {
-            const nfModule = await import(/* @vite-ignore */ nfPath);
+            const [nfModule, ...layoutModules] = await Promise.all([
+              import(/* @vite-ignore */ cacheBust(nfInfo.notFoundPath)),
+              ...nfInfo.layoutPaths.map((p) => import(/* @vite-ignore */ cacheBust(p))),
+            ]);
             setNotFoundComponent(() => nfModule.default);
+            setNotFoundLayouts(layoutModules.map((m) => m.default));
           } catch {
             // Fall back to hardcoded 404
             setNotFoundComponent(null);
+            setNotFoundLayouts([]);
           }
         }
         return;
@@ -193,24 +215,51 @@ export function Router() {
     };
   }, [resolve]);
 
-  // Register global navigate function and popstate listener
+  // Register global navigate function, popstate listener, and link interception
   useEffect(() => {
     if (!routes) return;
 
     routerNavigate = (href: string) => {
-      history.pushState({}, "", href);
-      resolve(href, routes);
+      const url = new URL(href, window.location.origin);
+      history.pushState({}, "", url.pathname);
+      resolve(url.pathname, routes);
     };
 
     const onPopState = () => {
       resolve(window.location.pathname, routes);
     };
 
+    const onClick = (e: MouseEvent) => {
+      if (e.defaultPrevented || e.button !== 0) return;
+      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+
+      const anchor = (e.target as Element).closest("a");
+      if (!anchor) return;
+      if (anchor.hasAttribute("download") || anchor.getAttribute("target") === "_blank") return;
+      if (anchor.getAttribute("rel")?.includes("external")) return;
+
+      const href = anchor.getAttribute("href");
+      if (!href || href.startsWith("#")) return;
+
+      try {
+        const url = new URL(href, window.location.origin);
+        if (url.origin !== window.location.origin) return;
+        e.preventDefault();
+        if (url.pathname !== window.location.pathname) {
+          routerNavigate!(url.href);
+        }
+      } catch {
+        return;
+      }
+    };
+
     window.addEventListener("popstate", onPopState);
+    document.addEventListener("click", onClick);
 
     return () => {
       routerNavigate = null;
       window.removeEventListener("popstate", onPopState);
+      document.removeEventListener("click", onClick);
     };
   }, [routes, resolve]);
 
@@ -223,11 +272,17 @@ export function Router() {
   }
 
   if (notFound) {
-    if (notFoundComponent) {
-      const NotFound = notFoundComponent;
-      return <NotFound />;
+    const NotFound = notFoundComponent || (() => <div style={{ padding: "2rem" }}><h1>404 — Page not found</h1></div>);
+    if (notFoundLayouts.length > 0) {
+      return (
+        <LayoutRenderer
+          layouts={notFoundLayouts}
+          page={NotFound}
+          params={{}}
+        />
+      );
     }
-    return <div style={{ padding: "2rem" }}><h1>404 — Page not found</h1></div>;
+    return <NotFound />;
   }
 
   if (!loaded) {

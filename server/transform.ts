@@ -1,6 +1,6 @@
 import { transform } from "esbuild";
 import { readFile, stat, access } from "node:fs/promises";
-import { extname, resolve, dirname } from "node:path";
+import { extname, resolve, dirname, basename } from "node:path";
 
 interface CacheEntry {
   mtime: number;
@@ -9,10 +9,10 @@ interface CacheEntry {
 
 const cache = new Map<string, CacheEntry>();
 
-const ROOT = process.cwd();
+const PROJECT_ROOT = process.cwd();
 
 async function resolveModulePath(specifier: string): Promise<string | null> {
-  const basePath = resolve(ROOT, specifier);
+  const basePath = resolve(PROJECT_ROOT, specifier);
   const extensions = [".tsx", ".ts", ".jsx", ".js", ""];
   
   for (const ext of extensions) {
@@ -65,6 +65,31 @@ function rewritePathAliases(code: string): Promise<string> {
   });
 }
 
+function isLayoutFile(filePath: string): boolean {
+  return /^layout\.[tj]sx?$/.test(basename(filePath));
+}
+
+/**
+ * In the browser, <html>/<body>/<head> can't live inside <div id="root">.
+ * For layout files, rewrite JSX element references so they render as
+ * pass-through wrappers (html/body → children, head → null).
+ */
+function stripDocumentElements(code: string): string {
+  if (!/\("(?:html|body|head)"\s*,/.test(code)) return code;
+
+  let result = code;
+  result = result.replace(/\("html"\s*,/g, "(__noBuild_html,");
+  result = result.replace(/\("body"\s*,/g, "(__noBuild_body,");
+  result = result.replace(/\("head"\s*,/g, "(__noBuild_head,");
+
+  const passthrough =
+    "var __noBuild_html=function(p){return p.children||null}," +
+    "__noBuild_body=function(p){return p.children||null}," +
+    "__noBuild_head=function(){return null};\n";
+
+  return passthrough + result;
+}
+
 export async function transformFile(filePath: string): Promise<string> {
   const stats = await stat(filePath);
   const mtime = stats.mtimeMs;
@@ -84,10 +109,17 @@ export async function transformFile(filePath: string): Promise<string> {
     jsx: "automatic",
     jsxImportSource: "react",
     sourcefile: filePath,
+    define: {
+      "process.env.NODE_ENV": '"development"',
+    },
   });
 
-  const rewritten = await rewritePathAliases(result.code);
-  
+  let rewritten = await rewritePathAliases(result.code);
+
+  if (isLayoutFile(filePath)) {
+    rewritten = stripDocumentElements(rewritten);
+  }
+
   cache.set(filePath, { mtime, code: rewritten });
   return rewritten;
 }
