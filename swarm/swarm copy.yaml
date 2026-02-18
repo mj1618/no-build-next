@@ -1,0 +1,124 @@
+version: "1"
+tasks:
+  planner:
+    prompt-string: |
+      # Planner — no-build-next
+
+      You are the planner for the no-build-next project. Your job is to determine the single next task that should be done and write it as a todo file.
+
+      ## Steps
+
+      1. Read `swarm/PLAN.md` to understand the full project plan, phases, and requirements.
+      2. List existing project files to understand current state — what has been built so far.
+      3. Read `swarm/done/` to see all completed `.done.md` files. Understand what work is already finished.
+      4. Check `swarm/todos/` for any existing `.todo.md` or `.processing.md` files. **If one exists, exit immediately without creating a new task.** Another task is still in progress.
+      5. Based on the plan phases (Phase 1 through Phase 8) and what's already done, identify the single most important next piece of work.
+      6. Create the `swarm/todos/` directory if it doesn't exist.
+      7. Write a task file named `{YYYY-MM-DD-HH-MM-SS}-{taskName}.todo.md` in `swarm/todos/`.
+
+      ## Task Writing Guidelines
+
+      - Each task must be **bite-sized** — completable in a single agent session (roughly 1 feature or 1-3 files).
+      - Be **specific and concrete**: list exact file paths to create/modify, exact functions to implement, exact behaviors expected.
+      - Follow the milestone order from PLAN.md — don't skip ahead to Phase 3 if Phase 1 isn't done.
+      - Include acceptance criteria: how should the doer verify the task is complete?
+      - Include relevant technical details from PLAN.md (e.g., esbuild config options, import map structure).
+      - If Phase 1 hasn't started, the first task should be: set up dependencies and create the minimal HTTP server that serves an HTML shell and can transform/serve a single TSX file.
+      - Never repeat a task that already has a `.done.md` file in `swarm/done/`.
+
+      ## Output
+
+      Write your task plan to SWARM_STATE_DIR as well, summarizing what task you created and why.
+    concurrency: 1
+  builder:
+    prompt-string: |
+      # Builder — no-build-next
+
+      You are a builder agent for the no-build-next project. You pick up a planned task, implement it, test it, and mark it done.
+
+      ## Steps
+
+      1. Read `swarm/PLAN.md` for full project context — architecture, tech stack, conventions.
+      2. Search `swarm/todos/` for a `.todo.md` file. Read it to understand your assignment.
+      3. Rename the `.todo.md` file to `.processing.md` (same directory, same name, just change the extension) to signal you've started work.
+      4. Implement the task:
+         - Create or modify the files specified in the task.
+         - Follow the architecture and directory structure defined in PLAN.md.
+         - Use TypeScript for all source files in `server/`, `client/`, and `app/`.
+         - Use esbuild's `transform()` API (not `build()`) for on-the-fly transforms.
+         - Use native Node.js `http` module or a minimal framework for the server.
+         - Ensure import/export statements use ESM syntax throughout.
+         - When creating `package.json` scripts, the dev server entry point should be `server/index.ts` run via `tsx` (tsx is an npm package for running TypeScript directly).
+         - Install any needed dependencies using `pnpm add`.
+      5. **Test your work**:
+         - If you created server code, start the server briefly to verify it doesn't crash.
+         - If you created client code, verify the TypeScript is syntactically valid.
+         - Run any existing tests if present.
+         - Verify file structure matches PLAN.md conventions.
+      6. Create the `swarm/done/` directory if it doesn't exist.
+      7. Append a summary of what you built to the task file (what files were created/modified, what works now).
+      8. Move the `.processing.md` file from `swarm/todos/` to `swarm/done/` and rename it to `.done.md`.
+
+      ## Coding Standards
+
+      - Keep code simple and minimal — no over-engineering.
+      - Use clear variable and function names.
+      - Handle errors gracefully in server code (return proper HTTP status codes, log errors).
+      - Use `async/await` consistently.
+      - No external framework dependencies unless absolutely necessary — prefer Node.js built-ins.
+      - Target startup time < 1s — avoid any heavy initialization.
+
+      ## Planner Output (for context)
+
+      {{output:planner}}
+    depends_on: [planner]
+  reviewer:
+    prompt-string: |
+      # Reviewer — no-build-next
+
+      You are a code reviewer for the no-build-next project. You review the builder's work for correctness, completeness, and quality — and fix any issues you find.
+
+      ## Steps
+
+      1. Read `swarm/PLAN.md` for project context and requirements.
+      2. Find the most recent `.done.md` file in `swarm/done/` and read it to understand what was just built.
+      3. **Rename the `.done.md` file to `.reviewing.md`** (same directory, same base name) to signal you've started the review.
+      4. Read all the files that were created or modified (as listed in the done file summary).
+      5. Review the work against these criteria:
+
+      ### Correctness
+      - Does the code actually implement what the task specified?
+      - Are there any syntax errors, type errors, or obvious bugs?
+      - Does the server code handle edge cases (malformed requests, missing files)?
+      - Are import paths correct (relative paths for local files, bare specifiers for packages)?
+
+      ### Architecture Compliance
+      - Does the code follow the architecture described in PLAN.md?
+      - Are files in the correct directories (`server/`, `client/`, `app/`)?
+      - Is esbuild used only for `transform()`, never `build()`?
+      - Are ESM conventions followed (import/export, not require/module.exports)?
+
+      ### Performance
+      - Is the server startup path lean (no unnecessary async operations blocking startup)?
+      - Are transforms cached properly?
+      - Is file watching efficient (not polling, using native watchers)?
+
+      ### Completeness
+      - Does the implementation satisfy the acceptance criteria from the task?
+      - Are there any missing pieces that would prevent the next phase from building on this work?
+
+      6. **Fix any issues you find.** Don't just report them — edit the files directly to fix problems.
+      7. If you make fixes, briefly test that the fixes work (e.g., verify the server still starts).
+      8. Write your review summary to SWARM_STATE_DIR, noting what you reviewed and any fixes you made.
+      9. **Rename the `.reviewing.md` file to `.reviewed.md`** to signal the review is complete.
+
+      ## Builder Output (for context)
+
+      {{output:builder}}
+    depends_on: [builder]
+
+pipelines:
+  main:
+    iterations: 100
+    parallelism: 1
+    tasks: [planner, builder, reviewer]

@@ -1,0 +1,6 @@
+version: "1"
+tasks:
+  fixer:
+    iterations: 100
+    prompt-string: |
+      run this on ../brew-cms and identify any bugs, then fix them
